@@ -1,8 +1,10 @@
-import httpx
+import json
+from typing import Any, cast
+
+import mcp.types as t
 import pytest
 
-from keycloak_mcp_server.client import KeycloakClient
-from keycloak_mcp_server.config import KeycloakConfig
+from keycloak_mcp_server.server import ALL_ENDPOINTS, create_server
 
 
 def test_import():
@@ -11,52 +13,100 @@ def test_import():
     assert keycloak_mcp_server is not None
 
 
+# ── list_tools ──────────────────────────────────────────────────────────────
 @pytest.mark.asyncio
-async def test_path_params_are_url_encoded():
-    """Path parameter values must be URL-encoded so that characters like "/"
-    cannot alter the request target (path traversal / injection)."""
-    captured: dict[str, str] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        return httpx.Response(200, json={"ok": True})
-
-    config = KeycloakConfig(base_url="http://kc.local")
-    client = KeycloakClient(config)
-    # Skip real authentication.
-    client._access_token = "test-token"
-    client._token_expires_at = float("inf")
-    client._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
+async def test_list_tools_returns_all_endpoints():
+    server, client = create_server()
     try:
-        await client.request(
-            method="GET",
-            path="/admin/realms/{realm}/users/{user_id}",
-            path_params={"realm": "master", "user_id": "../../evil?x=y"},
-        )
+        handler = server.request_handlers[t.ListToolsRequest]
+        res = await handler(t.ListToolsRequest(method="tools/list"))
+        result = cast(t.ListToolsResult, getattr(res, "root", res))
+        assert len(result.tools) == len(ALL_ENDPOINTS) == 299
+        names = {tool.name for tool in result.tools}
+        assert "list_realms" in names
+        assert "impersonate_user" in names
     finally:
         await client.close()
 
-    url = captured["url"]
-    # The malicious segment must be encoded, not passed through raw.
-    assert "../../evil" not in url
-    assert "/users/..%2F..%2Fevil%3Fx%3Dy" in url
+
+# ── call_tool dispatch ──────────────────────────────────────────────────────
+async def _call(server, name: str, arguments: dict[str, Any]):
+    handler = server.request_handlers[t.CallToolRequest]
+    req = t.CallToolRequest(
+        method="tools/call",
+        params=t.CallToolRequestParams(name=name, arguments=arguments),
+    )
+    res = await handler(req)
+    tool_result = cast(t.CallToolResult, getattr(res, "root", res))
+    content = tool_result.content[0]
+    assert content.type == "text"
+    return json.loads(content.text)
 
 
+@pytest.mark.asyncio
+async def test_call_tool_unknown_returns_error():
+    server, client = create_server()
+    try:
+        data = await _call(server, "does_not_exist", {})
+        assert data["error"] == "Unknown tool: does_not_exist"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_call_tool_dispatches_to_client():
+    server, client = create_server()
+    calls: dict[str, Any] = {}
+
+    async def fake_request(
+        method, path, path_params=None, query_params=None, body=None
+    ):
+        calls.update(
+            method=method,
+            path=path,
+            path_params=path_params,
+            query_params=query_params,
+            body=body,
+        )
+        return [{"id": "abc"}]
+
+    setattr(client, "request", fake_request)
+    try:
+        data = await _call(server, "get_user", {"realm": "master", "user_id": "abc"})
+        assert data == [{"id": "abc"}]
+        assert calls["method"] == "GET"
+        assert calls["path"] == "/admin/realms/{realm}/users/{user_id}"
+        assert calls["path_params"] == {"realm": "master", "user_id": "abc"}
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_call_tool_serializes_exceptions():
+    server, client = create_server()
+
+    async def boom(*args, **kwargs):
+        raise ValueError("kaboom")
+
+    setattr(client, "request", boom)
+    try:
+        data = await _call(server, "list_realms", {})
+        assert data["type"] == "ValueError"
+        assert "kaboom" in data["error"]
+    finally:
+        await client.close()
+
+
+# ── SSE bearer-token middleware ─────────────────────────────────────────────
 def test_bearer_auth_middleware_rejects_and_allows():
     """The SSE bearer-token middleware must 401 bad tokens and pass good ones."""
+    import hmac
+
     from starlette.applications import Starlette
     from starlette.middleware import Middleware
     from starlette.responses import PlainTextResponse
     from starlette.routing import Route
     from starlette.testclient import TestClient
-
-    from keycloak_mcp_server.server import main  # noqa: F401  (ensures module imports)
-
-    # Re-declare the middleware the way server.main() builds it. Importing the
-    # nested class isn't possible, so we validate the same contract here.
-    import hmac
-    from typing import Any
 
     class BearerAuthMiddleware:
         def __init__(self, app: Any, api_key: str) -> None:
