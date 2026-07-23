@@ -27,6 +27,9 @@ class KeycloakConfig:
             os.environ.get("KEYCLOAK_VERIFY_SSL", "true").lower() == "true"
         )
     )
+    sse_api_key: str = field(
+        default_factory=lambda: os.environ.get("KEYCLOAK_MCP_SSE_API_KEY", "")
+    )
 
     @property
     def token_url(self) -> str:
