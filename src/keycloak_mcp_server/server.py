@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import hmac
 import json
 import logging
 from typing import Any
@@ -134,7 +135,11 @@ def main() -> None:
     parser.add_argument(
         "--transport", choices=["stdio", "sse"], default="stdio", help="Transport type"
     )
-    parser.add_argument("--host", default="0.0.0.0", help="Host for SSE transport")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host for SSE transport (default: 127.0.0.1, loopback-only)",
+    )
     parser.add_argument("--port", type=int, default=8080, help="Port for SSE transport")
     args = parser.parse_args()
 
@@ -143,7 +148,51 @@ def main() -> None:
     if args.transport == "sse":
         from mcp.server.sse import SseServerTransport
         from starlette.applications import Starlette
+        from starlette.middleware import Middleware
+        from starlette.responses import PlainTextResponse
         from starlette.routing import Mount, Route
+
+        api_key = client._config.sse_api_key
+        loopback_hosts = {"127.0.0.1", "localhost", "::1"}
+
+        # The SSE transport exposes every admin tool over HTTP. Refuse to bind a
+        # non-loopback interface without an API key so it cannot be published
+        # unauthenticated by accident.
+        if not api_key and args.host not in loopback_hosts:
+            raise SystemExit(
+                f"Refusing to start SSE transport on non-loopback host {args.host!r} "
+                "without authentication. Set KEYCLOAK_MCP_SSE_API_KEY to require a "
+                "bearer token, or bind to 127.0.0.1 for local-only access."
+            )
+        if not api_key:
+            logger.warning(
+                "SSE transport starting WITHOUT authentication (bound to %s). "
+                "Set KEYCLOAK_MCP_SSE_API_KEY to require a bearer token.",
+                args.host,
+            )
+
+        class BearerAuthMiddleware:
+            """Pure-ASGI middleware enforcing a bearer token on HTTP requests.
+
+            Implemented as raw ASGI (not BaseHTTPMiddleware) so it does not
+            buffer or break the SSE streaming response.
+            """
+
+            def __init__(self, app: Any, api_key: str) -> None:
+                self.app = app
+                self._expected = f"Bearer {api_key}"
+
+            async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+                if scope["type"] != "http":
+                    await self.app(scope, receive, send)
+                    return
+                headers = dict(scope.get("headers") or [])
+                provided = headers.get(b"authorization", b"").decode("latin-1")
+                if not hmac.compare_digest(provided, self._expected):
+                    response = PlainTextResponse("Unauthorized", status_code=401)
+                    await response(scope, receive, send)
+                    return
+                await self.app(scope, receive, send)
 
         sse = SseServerTransport("/messages/")
 
@@ -155,11 +204,16 @@ def main() -> None:
                     streams[0], streams[1], server.create_initialization_options()
                 )
 
+        middleware = (
+            [Middleware(BearerAuthMiddleware, api_key=api_key)] if api_key else []
+        )
+
         app = Starlette(
+            middleware=middleware,
             routes=[
                 Route("/sse", endpoint=handle_sse),
                 Mount("/messages/", app=sse.handle_post_message),
-            ]
+            ],
         )
 
         import uvicorn

@@ -142,6 +142,20 @@ Start the server with SSE transport:
 python -m keycloak_mcp_server --transport sse --port 8080
 ```
 
+> ⚠️ **The SSE transport exposes every admin tool over HTTP.** It binds to
+> `127.0.0.1` (loopback) by default. To bind any other interface you **must**
+> set an API key — the server refuses to start on a non-loopback host without
+> one:
+>
+> ```bash
+> export KEYCLOAK_MCP_SSE_API_KEY="$(openssl rand -hex 32)"
+> python -m keycloak_mcp_server --transport sse --host 0.0.0.0 --port 8080
+> ```
+>
+> Clients must then send `Authorization: Bearer <key>` on every request. Even
+> with a key, prefer keeping the port behind a reverse proxy / VPN rather than
+> exposing it directly to the internet.
+
 Then configure in your GitHub Copilot MCP settings (VS Code `settings.json`):
 
 ```json
@@ -161,8 +175,12 @@ Then configure in your GitHub Copilot MCP settings (VS Code `settings.json`):
 # stdio mode (default)
 python -m keycloak_mcp_server
 
-# SSE mode
-python -m keycloak_mcp_server --transport sse --host 0.0.0.0 --port 8080
+# SSE mode (loopback-only by default)
+python -m keycloak_mcp_server --transport sse --port 8080
+
+# SSE mode on all interfaces (requires KEYCLOAK_MCP_SSE_API_KEY)
+KEYCLOAK_MCP_SSE_API_KEY="$(openssl rand -hex 32)" \
+  python -m keycloak_mcp_server --transport sse --host 0.0.0.0 --port 8080
 
 # Using the entry point
 keycloak-mcp-server --transport sse --port 8080
@@ -188,6 +206,9 @@ When attaching this MCP server to your AI Assistants, please strictly follow the
 
 4. **Always Verify SSL**:
    Keep `KEYCLOAK_VERIFY_SSL=true` enabled in production to prevent Man-in-the-Middle (MITM) attacks. Setting it to `false` is only acceptable for local development.
+
+5. **Protect the SSE transport**:
+   Prefer `stdio` when possible. If you use `--transport sse`, set `KEYCLOAK_MCP_SSE_API_KEY` (required to bind any non-loopback host) so clients must present `Authorization: Bearer <key>`, and keep the port behind a reverse proxy or VPN — never expose it directly.
 
 ## Examples
 

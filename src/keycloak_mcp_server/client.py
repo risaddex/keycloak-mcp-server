@@ -1,6 +1,7 @@
 import json
 import time
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -58,7 +59,11 @@ class KeycloakClient:
 
         url = self._config.base_url + path
         if path_params:
-            url = url.format(**path_params)
+            # URL-encode each path segment value so that characters like "/",
+            # "..", "?" or "#" in an argument cannot alter the request target
+            # (path traversal / injection). safe="" also encodes "/".
+            encoded = {k: quote(str(v), safe="") for k, v in path_params.items()}
+            url = url.format(**encoded)
 
         filtered_query: dict[str, Any] = {}
         if query_params:
