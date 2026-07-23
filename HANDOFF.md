@@ -90,9 +90,12 @@ MCP client config:
    an absolute `/messages/` path**, which breaks under path-prefix + StripPrefix.
    A path-based variant is included **commented** in `manifests.yaml` if you
    still want the shared domain — but test the `/messages/` POST if you use it.
-3. **Least privilege**: create a dedicated Keycloak service-account client with
-   only needed roles (`view-*` for read-only, `manage-users` max). Do NOT wire
-   the master super-admin.
+3. **Least privilege**: create a **per-realm** service-account client (inside the
+   target realm, not `master`) granted only the roles it needs from that realm's
+   `realm-management` client (`view-*` read-only, `manage-users` max). Set
+   `KEYCLOAK_ADMIN_REALM` to that realm. Use `master` only for cross-realm /
+   realm-creation needs — and even then scope the roles, never the super-admin.
+   See `deploy/homelab/README.md` step 2 for the exact console steps.
 
 ## Optional security follow-ups (NOT done — low severity)
 
