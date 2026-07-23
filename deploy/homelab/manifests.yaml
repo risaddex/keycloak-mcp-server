@@ -1,0 +1,142 @@
+# Keycloak MCP Server — homelab k3s manifests (Traefik ingress)
+#
+# Apply order:
+#   1. Create the secret first (see secret.example.yaml or an ExternalSecret).
+#   2. kubectl apply -f manifests.yaml
+#
+# Routing: this uses a DEDICATED SUBDOMAIN (host-based routing) instead of
+# mcp.daniloromano.dev/<slug>. Reason: the MCP SSE transport advertises its
+# message endpoint as an ABSOLUTE path ("/messages/"), which breaks under
+# path-prefix routing + StripPrefix (the client would POST to
+# mcp.daniloromano.dev/messages/ instead of .../keycloak/messages/). A dedicated
+# host avoids that entirely. A path-based variant is included (commented) at the
+# bottom with the caveat, if you still want it under mcp.daniloromano.dev.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak-mcp
+  namespace: mcp
+  labels:
+    app.kubernetes.io/name: keycloak-mcp
+    app.kubernetes.io/part-of: mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keycloak-mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: keycloak-mcp
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: keycloak-mcp
+          # Replace with your published image + an immutable tag/digest.
+          image: ghcr.io/risaddex/keycloak-mcp-server:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: ["--transport", "sse", "--host", "0.0.0.0", "--port", "8080"]
+          # KEYCLOAK_URL, KEYCLOAK_CLIENT_ID, KEYCLOAK_CLIENT_SECRET and
+          # KEYCLOAK_MCP_SSE_API_KEY all come from the secret below.
+          envFrom:
+            - secretRef:
+                name: keycloak-mcp-secrets
+          ports:
+            - name: http
+              containerPort: 8080
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-mcp
+  namespace: mcp
+  labels:
+    app.kubernetes.io/name: keycloak-mcp
+spec:
+  selector:
+    app.kubernetes.io/name: keycloak-mcp
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# Host-based route (recommended). Requires a DNS/Cloudflare-Tunnel entry for
+# keycloak-mcp.daniloromano.dev pointing at this cluster's Traefik.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: keycloak-mcp
+  namespace: mcp
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`keycloak-mcp.daniloromano.dev`)
+      kind: Rule
+      services:
+        - name: keycloak-mcp
+          port: 80
+  tls: {}
+# ─────────────────────────────────────────────────────────────────────────────
+# PATH-BASED VARIANT (under mcp.daniloromano.dev/keycloak) — use ONLY if you
+# accept the SSE /messages/ caveat above or front it with a client that rewrites
+# the endpoint. It needs a StripPrefix middleware:
+#
+# apiVersion: traefik.io/v1alpha1
+# kind: Middleware
+# metadata:
+#   name: keycloak-mcp-stripprefix
+#   namespace: mcp
+# spec:
+#   stripPrefix:
+#     prefixes: ["/keycloak"]
+# ---
+# apiVersion: traefik.io/v1alpha1
+# kind: IngressRoute
+# metadata:
+#   name: keycloak-mcp-path
+#   namespace: mcp
+# spec:
+#   entryPoints: ["websecure"]
+#   routes:
+#     - match: Host(`mcp.daniloromano.dev`) && PathPrefix(`/keycloak`)
+#       kind: Rule
+#       middlewares:
+#         - name: keycloak-mcp-stripprefix
+#       services:
+#         - name: keycloak-mcp
+#           port: 80
+#   tls: {}
