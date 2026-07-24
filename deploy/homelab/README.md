@@ -24,7 +24,27 @@ docker push "$IMAGE"
 Update the `image:` field in `manifests.yaml` if you use a different registry/tag.
 Prefer an immutable tag or digest — k3s/ArgoCD won't redeploy on a moved `latest`.
 
-## 2. Create the secret
+## 2. Create a scoped Keycloak service account (least privilege)
+
+You do **not** need a `master` super-admin. Prefer a service-account client that
+lives **inside your target realm** and can manage only that realm.
+
+In the target realm (e.g. `meurealm`):
+
+1. **Clients → Create client** → id `keycloak-mcp`; enable *Client
+   authentication* and *Service account roles* (turn *Standard flow* off).
+2. **Credentials** tab → copy the client secret.
+3. **Service account roles → Assign role** → filter by the built-in
+   `realm-management` client and grant only what's needed:
+   - read-only: `view-users`, `view-clients`, `view-realm`
+   - manage users: `manage-users`
+   - avoid `realm-admin` (that's full realm admin).
+
+Then set `KEYCLOAK_ADMIN_REALM` to that realm (the client authenticates there).
+Use `master` only if the assistant must span multiple realms or create realms —
+and even then scope its roles, never the super-admin.
+
+## 3. Create the secret
 
 Do **not** commit real credentials. Materialize it via Bitwarden/ExternalSecrets
 (your convention) or, for a quick test, from the example:
@@ -37,7 +57,7 @@ cp secret.example.yaml /tmp/keycloak-mcp-secret.yaml
 kubectl apply -f /tmp/keycloak-mcp-secret.yaml
 ```
 
-## 3. Apply the manifests
+## 4. Apply the manifests
 
 ```bash
 kubectl apply -f manifests.yaml
@@ -47,7 +67,7 @@ kubectl -n mcp rollout status deploy/keycloak-mcp
 Add a DNS / Cloudflare-Tunnel entry for `keycloak-mcp.daniloromano.dev` → cluster
 Traefik if it doesn't exist yet.
 
-## 4. Verify
+## 5. Verify
 
 ```bash
 kubectl -n mcp get pods,svc,ingressroute
@@ -56,7 +76,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://keycloak-mcp.daniloromano.dev/
 curl -sS -H "Authorization: Bearer $KEY" https://keycloak-mcp.daniloromano.dev/sse
 ```
 
-## 5. Point your MCP client at it
+## 6. Point your MCP client at it
 
 ```json
 {
@@ -75,9 +95,10 @@ curl -sS -H "Authorization: Bearer $KEY" https://keycloak-mcp.daniloromano.dev/s
 - **The SSE endpoint exposes all 299 admin tools.** The bearer key
   (`KEYCLOAK_MCP_SSE_API_KEY`) is mandatory — the server refuses to bind
   `0.0.0.0` without it. Keep the endpoint behind Cloudflare/VPN even so.
-- **Least privilege**: use a dedicated Keycloak client (service account) with
-  only the roles the assistant needs (`view-*` for read-only, `manage-users` at
-  most). Never wire the master super-admin.
+- **Least privilege**: use a per-realm service-account client (step 2) with only
+  the `realm-management` roles the assistant needs (`view-*` for read-only,
+  `manage-users` at most). It manages only its own realm. Never wire the master
+  super-admin; use `master` only for cross-realm / realm-creation needs.
 - **Routing caveat**: this uses a dedicated hostname because the MCP SSE
   transport advertises an absolute `/messages/` path that breaks under
   `mcp.daniloromano.dev/<slug>` + StripPrefix. See the commented path-based
